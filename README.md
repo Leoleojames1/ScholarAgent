@@ -27,6 +27,12 @@ To start the application, follow these steps:
 
 Once running, you can interact with the AI agent through the Gradio UI.
 
+### Use Hugging Face Space Version
+If you prefer to use the Hugging Face Space version of ScholarAgent, visit:
+
+🔗 [ScholarAgent on Hugging Face](https://huggingface.co/spaces/pdx97/ScholarAgent)
+
+
 ## Usage
 
 1. Enter keywords or full sentence queries in the search box.
