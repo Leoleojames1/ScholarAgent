@@ -23,7 +23,7 @@ import yaml
 from smolagents import CodeAgent, HfApiModel, DuckDuckGoSearchTool
 from tools.final_answer import FinalAnswerTool
 from tools.advanced_arxiv_tool import AdvancedArxivTool
-from custom_gradio_ui import ScholarAgentUI
+from standalone_ui import ScholarAgentStandaloneUI  # Use the standalone UI instead
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run ScholarAgent with Advanced ArXiv Integration")
@@ -45,15 +45,17 @@ def main():
     download_path = Path(args.download_path)
     download_path.mkdir(parents=True, exist_ok=True)
     
-    uploads_path = Path("./uploads")
-    uploads_path.mkdir(parents=True, exist_ok=True)
-    
     # Set database path if not specified
     db_path = args.db_path if args.db_path else str(download_path / "arxiv_papers.db")
     
     # Initialize tools
     final_answer = FinalAnswerTool()
-    web_search = DuckDuckGoSearchTool(max_results=5)
+    try:
+        web_search = DuckDuckGoSearchTool(max_results=5)
+        have_web_search = True
+    except ImportError:
+        print("DuckDuckGoSearchTool not available. Web search will be disabled.")
+        have_web_search = False
     
     # Initialize the advanced arXiv tool
     advanced_arxiv = AdvancedArxivTool(
@@ -81,9 +83,13 @@ def main():
     print(f"✓ Initialized model: {args.model_id}")
     
     # Create the agent with all tools
+    tools = [final_answer, advanced_arxiv]
+    if have_web_search:
+        tools.append(web_search)
+        
     agent = CodeAgent(
         model=model,
-        tools=[final_answer, web_search, advanced_arxiv],
+        tools=tools,
         max_steps=6,
         verbosity_level=1,
         name="ScholarAgent",
@@ -93,13 +99,12 @@ def main():
     
     print(f"✓ Created ScholarAgent with advanced arXiv capabilities")
     
-    # Launch the custom UI
+    # Launch the standalone UI
     print(f"✓ Launching ScholarAgent UI...")
-    ui = ScholarAgentUI(
+    ui = ScholarAgentStandaloneUI(
         agent=agent,
         download_path=str(download_path),
-        db_path=db_path,
-        file_upload_folder=str(uploads_path)
+        db_path=db_path
     )
     
     ui.launch(share=args.share)
