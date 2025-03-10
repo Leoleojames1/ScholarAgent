@@ -127,28 +127,41 @@
 
 
 """------Applied TF-IDF for better semantic search------"""
+"""
+ScholarAgent with Advanced ArXiv Integration
+
+This app extends the ScholarAgent with powerful capabilities for fetching, 
+downloading, and analyzing arXiv papers including their LaTeX source code.
+"""
+
 import feedparser
 import urllib.parse
 import yaml
+import os
 from tools.final_answer import FinalAnswerTool
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import gradio as gr
-from smolagents import CodeAgent,DuckDuckGoSearchTool, HfApiModel,load_tool,tool
+from smolagents import CodeAgent, DuckDuckGoSearchTool, HfApiModel, load_tool, tool
 import nltk
-
 import datetime
 import requests
 import pytz
-from tools.final_answer import FinalAnswerTool
+import argparse
+from pathlib import Path
 
+# Import UI components
 from Gradio_UI import GradioUI
 
-nltk.download("stopwords")
+# Import the Advanced ArXiv Tool
+from tools.advanced_arxiv_tool import AdvancedArxivTool
+
+# Set up NLTK resources
+nltk.download("stopwords", quiet=True)
 from nltk.corpus import stopwords
 
-@tool  # ✅ Register the function properly as a SmolAgents tool
+@tool
 def fetch_latest_arxiv_papers(keywords: list, num_results: int = 5) -> list:
     """Fetches and ranks arXiv papers using TF-IDF and Cosine Similarity.
 
@@ -194,10 +207,10 @@ def fetch_latest_arxiv_papers(keywords: list, num_results: int = 5) -> list:
         query_str = " ".join(keywords)
         query_vec = vectorizer.transform([query_str])
 
-        #Compute Cosine Similarity
+        # Compute Cosine Similarity
         similarity_scores = cosine_similarity(query_vec, tfidf_matrix).flatten()
 
-        #Sort papers based on similarity score
+        # Sort papers based on similarity score
         ranked_papers = sorted(zip(papers, similarity_scores), key=lambda x: x[1], reverse=True)
 
         # Return the most relevant papers
@@ -206,6 +219,7 @@ def fetch_latest_arxiv_papers(keywords: list, num_results: int = 5) -> list:
     except Exception as e:
         print(f"ERROR: {str(e)}")
         return [{"error": f"Error fetching research papers: {str(e)}"}]
+
 @tool
 def get_current_time_in_timezone(timezone: str) -> str:
     """A tool that fetches the current local time in a specified timezone.
@@ -221,43 +235,49 @@ def get_current_time_in_timezone(timezone: str) -> str:
     except Exception as e:
         return f"Error fetching time for timezone '{timezone}': {str(e)}"
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='ScholarAgent with Advanced ArXiv capabilities')
+    parser.add_argument('--download-path', default='./papers', help='Path to download papers')
+    parser.add_argument('--db-path', default=None, help='Path to SQLite database (optional)')
+    parser.add_argument('--model-id', default='Qwen/Qwen2.5-Coder-32B-Instruct', 
+                       help='HuggingFace model ID to use')
+    parser.add_argument('--share', action='store_true', help='Share the Gradio interface')
+    
+    return parser.parse_args()
 
-final_answer = FinalAnswerTool()
+def run_basic_ui():
+    """Run the original basic UI"""
+    # Create Gradio UI
+    with gr.Blocks() as demo:
+        gr.Markdown("# ScholarAgent")
+        keyword_input = gr.Textbox(label="Enter keywords (comma-separated)", 
+                                  placeholder="e.g., deep learning, reinforcement learning")
+        output_display = gr.Markdown()
+        search_button = gr.Button("Search")
 
+        search_button.click(search_papers, inputs=[keyword_input], outputs=[output_display])
 
-# AI Model
-model = HfApiModel(
-    max_tokens=2096,
-    temperature=0.5,
-    model_id='Qwen/Qwen2.5-Coder-32B-Instruct',
-    custom_role_conversions=None,
-)
+        print("DEBUG: Basic Gradio UI is running. Waiting for user input...")
 
-# Import tool from Hub
-image_generation_tool = load_tool("agents-course/text-to-image", trust_remote_code=True)
+    # Launch Gradio App
+    demo.launch()
 
+def run_advanced_ui(agent, args):
+    """Run the advanced UI with the full agent"""
+    # Create an upload folder for PDFs and other documents
+    upload_folder = Path("./uploads")
+    upload_folder.mkdir(exist_ok=True)
+    
+    # Initialize the GradioUI with our agent
+    ui = GradioUI(agent=agent, file_upload_folder=str(upload_folder))
+    
+    # Launch the UI
+    print("DEBUG: Advanced Gradio UI with agent integration is running...")
+    ui.launch(share=args.share)
 
-# Load prompt templates
-with open("prompts.yaml", 'r') as stream:
-    prompt_templates = yaml.safe_load(stream)
-
-# Create the AI Agent
-agent = CodeAgent(
-    model=model,
-    tools=[final_answer,fetch_latest_arxiv_papers],  # Add your tools here 
-    max_steps=6,
-    verbosity_level=1,
-    grammar=None,
-    planning_interval=None,
-    name="ScholarAgent",
-    description="An AI agent that fetches the latest research papers from arXiv based on user-defined keywords and filters.",
-    prompt_templates=prompt_templates
-)
-
-
-
-#Search Papers
 def search_papers(user_input):
+    """Legacy function for basic UI paper search"""
     keywords = [kw.strip() for kw in user_input.split(",") if kw.strip()]  # Ensure valid keywords
     print(f"DEBUG: Received input keywords - {keywords}")  # Debug user input
     
@@ -288,18 +308,55 @@ def search_papers(user_input):
     print("DEBUG: No results found.")
     return "No results found. Try different keywords."
 
+def main():
+    """Main entry point for the application"""
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Create download directory if it doesn't exist
+    os.makedirs(args.download_path, exist_ok=True)
+    
+    # Initialize tools
+    final_answer = FinalAnswerTool()
+    web_search = DuckDuckGoSearchTool(max_results=5)
+    
+    # Initialize the advanced arXiv tool
+    advanced_arxiv = AdvancedArxivTool(
+        download_path=args.download_path,
+        db_path=args.db_path
+    )
+    
+    # Load prompt templates
+    with open("prompts.yaml", 'r') as stream:
+        prompt_templates = yaml.safe_load(stream)
+    
+    # Create the AI Model
+    model = HfApiModel(
+        max_tokens=2096,
+        temperature=0.5,
+        model_id=args.model_id,
+        custom_role_conversions=None,
+    )
+    
+    # Create the AI Agent with all tools
+    agent = CodeAgent(
+        model=model,
+        tools=[final_answer, fetch_latest_arxiv_papers, web_search, advanced_arxiv, get_current_time_in_timezone],
+        max_steps=6,
+        verbosity_level=1,
+        grammar=None,
+        planning_interval=None,
+        name="ScholarAgent",
+        description="An AI agent that fetches, downloads, and analyzes research papers from arXiv.",
+        prompt_templates=prompt_templates
+    )
+    
+    # Run the advanced UI with the full agent
+    run_advanced_ui(agent, args)
 
+if __name__ == "__main__":
+    main()
 
-# Create Gradio UI
-with gr.Blocks() as demo:
-    gr.Markdown("# ScholarAgent")
-    keyword_input = gr.Textbox(label="Enter keywords (comma-separated)", placeholder="e.g., deep learning, reinforcement learning")
-    output_display = gr.Markdown()
-    search_button = gr.Button("Search")
-
-    search_button.click(search_papers, inputs=[keyword_input], outputs=[output_display])
-
-    print("DEBUG: Gradio UI is running. Waiting for user input...")
 
 # Launch Gradio App
 demo.launch()
