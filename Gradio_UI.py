@@ -13,284 +13,270 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import mimetypes
+"""
+Enhanced Gradio UI for ScholarAgent with Advanced ArXiv Integration
+
+This module provides a custom Gradio UI that extends the standard GradioUI
+with specialized tabs for advanced arXiv functionalities.
+"""
 import os
-import re
-import shutil
-from typing import Optional
-
-from smolagents.agent_types import AgentAudio, AgentImage, AgentText, handle_agent_output_types
-from smolagents.agents import ActionStep, MultiStepAgent
-from smolagents.memory import MemoryStep
-from smolagents.utils import _is_package_available
+import sqlite3
+import json
+from pathlib import Path
+import gradio as gr
+from smolagents.agents import MultiStepAgent
+from Gradio_UI import GradioUI, stream_to_gradio
 
 
-def pull_messages_from_step(
-    step_log: MemoryStep,
-):
-    """Extract ChatMessage objects from agent steps with proper nesting"""
-    import gradio as gr
-
-    if isinstance(step_log, ActionStep):
-        # Output the step number
-        step_number = f"Step {step_log.step_number}" if step_log.step_number is not None else ""
-        yield gr.ChatMessage(role="assistant", content=f"**{step_number}**")
-
-        # First yield the thought/reasoning from the LLM
-        if hasattr(step_log, "model_output") and step_log.model_output is not None:
-            # Clean up the LLM output
-            model_output = step_log.model_output.strip()
-            # Remove any trailing <end_code> and extra backticks, handling multiple possible formats
-            model_output = re.sub(r"```\s*<end_code>", "```", model_output)  # handles ```<end_code>
-            model_output = re.sub(r"<end_code>\s*```", "```", model_output)  # handles <end_code>```
-            model_output = re.sub(r"```\s*\n\s*<end_code>", "```", model_output)  # handles ```\n<end_code>
-            model_output = model_output.strip()
-            yield gr.ChatMessage(role="assistant", content=model_output)
-
-        # For tool calls, create a parent message
-        if hasattr(step_log, "tool_calls") and step_log.tool_calls is not None:
-            first_tool_call = step_log.tool_calls[0]
-            used_code = first_tool_call.name == "python_interpreter"
-            parent_id = f"call_{len(step_log.tool_calls)}"
-
-            # Tool call becomes the parent message with timing info
-            # First we will handle arguments based on type
-            args = first_tool_call.arguments
-            if isinstance(args, dict):
-                content = str(args.get("answer", str(args)))
-            else:
-                content = str(args).strip()
-
-            if used_code:
-                # Clean up the content by removing any end code tags
-                content = re.sub(r"```.*?\n", "", content)  # Remove existing code blocks
-                content = re.sub(r"\s*<end_code>\s*", "", content)  # Remove end_code tags
-                content = content.strip()
-                if not content.startswith("```python"):
-                    content = f"```python\n{content}\n```"
-
-            parent_message_tool = gr.ChatMessage(
-                role="assistant",
-                content=content,
-                metadata={
-                    "title": f"🛠️ Used tool {first_tool_call.name}",
-                    "id": parent_id,
-                    "status": "pending",
-                },
-            )
-            yield parent_message_tool
-
-            # Nesting execution logs under the tool call if they exist
-            if hasattr(step_log, "observations") and (
-                step_log.observations is not None and step_log.observations.strip()
-            ):  # Only yield execution logs if there's actual content
-                log_content = step_log.observations.strip()
-                if log_content:
-                    log_content = re.sub(r"^Execution logs:\s*", "", log_content)
-                    yield gr.ChatMessage(
-                        role="assistant",
-                        content=f"{log_content}",
-                        metadata={"title": "📝 Execution Logs", "parent_id": parent_id, "status": "done"},
-                    )
-
-            # Nesting any errors under the tool call
-            if hasattr(step_log, "error") and step_log.error is not None:
-                yield gr.ChatMessage(
-                    role="assistant",
-                    content=str(step_log.error),
-                    metadata={"title": "💥 Error", "parent_id": parent_id, "status": "done"},
-                )
-
-            # Update parent message metadata to done status without yielding a new message
-            parent_message_tool.metadata["status"] = "done"
-
-        # Handle standalone errors but not from tool calls
-        elif hasattr(step_log, "error") and step_log.error is not None:
-            yield gr.ChatMessage(role="assistant", content=str(step_log.error), metadata={"title": "💥 Error"})
-
-        # Calculate duration and token information
-        step_footnote = f"{step_number}"
-        if hasattr(step_log, "input_token_count") and hasattr(step_log, "output_token_count"):
-            token_str = (
-                f" | Input-tokens:{step_log.input_token_count:,} | Output-tokens:{step_log.output_token_count:,}"
-            )
-            step_footnote += token_str
-        if hasattr(step_log, "duration"):
-            step_duration = f" | Duration: {round(float(step_log.duration), 2)}" if step_log.duration else None
-            step_footnote += step_duration
-        step_footnote = f"""<span style="color: #bbbbc2; font-size: 12px;">{step_footnote}</span> """
-        yield gr.ChatMessage(role="assistant", content=f"{step_footnote}")
-        yield gr.ChatMessage(role="assistant", content="-----")
-
-
-def stream_to_gradio(
-    agent,
-    task: str,
-    reset_agent_memory: bool = False,
-    additional_args: Optional[dict] = None,
-):
-    """Runs an agent with the given task and streams the messages from the agent as gradio ChatMessages."""
-    if not _is_package_available("gradio"):
-        raise ModuleNotFoundError(
-            "Please install 'gradio' extra to use the GradioUI: `pip install 'smolagents[gradio]'`"
-        )
-    import gradio as gr
-
-    total_input_tokens = 0
-    total_output_tokens = 0
-
-    for step_log in agent.run(task, stream=True, reset=reset_agent_memory, additional_args=additional_args):
-        # Track tokens if model provides them
-        if hasattr(agent.model, "last_input_token_count"):
-            total_input_tokens += agent.model.last_input_token_count
-            total_output_tokens += agent.model.last_output_token_count
-            if isinstance(step_log, ActionStep):
-                step_log.input_token_count = agent.model.last_input_token_count
-                step_log.output_token_count = agent.model.last_output_token_count
-
-        for message in pull_messages_from_step(
-            step_log,
-        ):
-            yield message
-
-    final_answer = step_log  # Last log is the run's final_answer
-    final_answer = handle_agent_output_types(final_answer)
-
-    if isinstance(final_answer, AgentText):
-        yield gr.ChatMessage(
-            role="assistant",
-            content=f"**Final answer:**\n{final_answer.to_string()}\n",
-        )
-    elif isinstance(final_answer, AgentImage):
-        yield gr.ChatMessage(
-            role="assistant",
-            content={"path": final_answer.to_string(), "mime_type": "image/png"},
-        )
-    elif isinstance(final_answer, AgentAudio):
-        yield gr.ChatMessage(
-            role="assistant",
-            content={"path": final_answer.to_string(), "mime_type": "audio/wav"},
-        )
-    else:
-        yield gr.ChatMessage(role="assistant", content=f"**Final answer:** {str(final_answer)}")
-
-
-class GradioUI:
-    """A one-line interface to launch your agent in Gradio"""
-
-    def __init__(self, agent: MultiStepAgent, file_upload_folder: str | None = None):
-        if not _is_package_available("gradio"):
-            raise ModuleNotFoundError(
-                "Please install 'gradio' extra to use the GradioUI: `pip install 'smolagents[gradio]'`"
-            )
-        self.agent = agent
-        self.file_upload_folder = file_upload_folder
-        if self.file_upload_folder is not None:
-            if not os.path.exists(file_upload_folder):
-                os.mkdir(file_upload_folder)
-
-    def interact_with_agent(self, prompt, messages):
-        import gradio as gr
-
-        messages.append(gr.ChatMessage(role="user", content=prompt))
-        yield messages
-        for msg in stream_to_gradio(self.agent, task=prompt, reset_agent_memory=False):
-            messages.append(msg)
-            yield messages
-        yield messages
-
-    def upload_file(
-        self,
-        file,
-        file_uploads_log,
-        allowed_file_types=[
-            "application/pdf",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "text/plain",
-        ],
-    ):
+class ScholarAgentUI(GradioUI):
+    """
+    Enhanced UI for ScholarAgent with specialized tabs for arXiv research
+    
+    This UI extends the standard GradioUI with tabs for:
+    - Basic paper search
+    - Advanced paper analysis
+    - Database exploration
+    - LaTeX extraction
+    """
+    
+    def __init__(self, agent: MultiStepAgent, download_path: str, db_path: str = None, 
+                 file_upload_folder: str = None):
         """
-        Handle file uploads, default allowed types are .pdf, .docx, and .txt
+        Initialize the ScholarAgent UI
+        
+        Args:
+            agent: The CodeAgent instance with tools
+            download_path: Path where papers are downloaded
+            db_path: Path to the SQLite database
+            file_upload_folder: Folder for general file uploads
         """
-        import gradio as gr
-
-        if file is None:
-            return gr.Textbox("No file uploaded", visible=True), file_uploads_log
-
+        super().__init__(agent=agent, file_upload_folder=file_upload_folder)
+        self.download_path = Path(download_path)
+        self.db_path = db_path if db_path else str(self.download_path / "arxiv_papers.db")
+    
+    def search_papers_simple(self, keywords):
+        """Simple keyword search for papers"""
+        formatted_input = f"Search for recent papers about {keywords}"
+        return self.agent.run(formatted_input)
+    
+    def analyze_paper(self, paper_id, analysis_request):
+        """Analyze a specific paper"""
+        if not paper_id or not analysis_request:
+            return "Please provide both a paper ID/URL and analysis request."
+        
+        formatted_input = f"For the paper {paper_id}, {analysis_request}"
+        return self.agent.run(formatted_input)
+    
+    def extract_latex(self, paper_id, extract_type):
+        """Extract LaTeX content from a paper"""
+        if not paper_id:
+            return "Please provide a paper ID or URL."
+        
+        if extract_type == "All LaTeX":
+            query = f"Download and extract all LaTeX content from paper {paper_id}"
+        elif extract_type == "Equations Only":
+            query = f"Extract and explain all mathematical equations from paper {paper_id}"
+        elif extract_type == "Algorithms Only":
+            query = f"Extract and explain all algorithms from paper {paper_id}"
+        else:
+            query = f"Download and extract the most important parts from the LaTeX source of paper {paper_id}"
+        
+        return self.agent.run(query)
+    
+    def explore_database(self):
+        """Explore the papers in the database"""
+        if not os.path.exists(self.db_path):
+            return "Database not initialized yet. Search for papers first to populate the database."
+        
         try:
-            mime_type, _ = mimetypes.guess_type(file.name)
-        except Exception as e:
-            return gr.Textbox(f"Error: {e}", visible=True), file_uploads_log
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get paper count
+            cursor.execute("SELECT COUNT(*) FROM papers")
+            paper_count = cursor.fetchone()[0]
+            
+            # Get latex content count
+            cursor.execute("SELECT COUNT(*) FROM latex_content")
+            latex_count = cursor.fetchone()[0]
+            
+            # Get 5 most recent papers
+            cursor.execute('''
+                SELECT arxiv_id, title, published FROM papers 
+                ORDER BY download_timestamp DESC LIMIT 5
+            ''')
+            recent_papers = cursor.fetchall()
+            
+            recent_papers_text = "\n".join([
+                f"- [{row[0]}]({row[0]}): {row[1]} ({row[2][:10]})" 
+                for row in recent_papers
+            ])
+            
+            # Get top categories
+            cursor.execute('''
+                SELECT papers.categories FROM papers
+            ''')
+            all_categories = cursor.fetchall()
+            
+            # Process categories (they're stored as JSON strings)
+            category_count = {}
+            for cat_json in all_categories:
+                if cat_json[0]:
+                    categories = json.loads(cat_json[0])
+                    for cat in categories:
+                        if cat in category_count:
+                            category_count[cat] += 1
+                        else:
+                            category_count[cat] = 1
+            
+            # Get top 5 categories
+            top_categories = sorted(category_count.items(), key=lambda x: x[1], reverse=True)[:5]
+            categories_text = "\n".join([f"- {cat}: {count} papers" for cat, count in top_categories])
+            
+            conn.close()
+            
+            return f"""## Database Statistics
+- Total papers: {paper_count}
+- Papers with LaTeX content: {latex_count}
 
-        if mime_type not in allowed_file_types:
-            return gr.Textbox("File type disallowed", visible=True), file_uploads_log
+## Top Categories:
+{categories_text}
 
-        # Sanitize file name
-        original_name = os.path.basename(file.name)
-        sanitized_name = re.sub(
-            r"[^\w\-.]", "_", original_name
-        )  # Replace any non-alphanumeric, non-dash, or non-dot characters with underscores
-
-        type_to_ext = {}
-        for ext, t in mimetypes.types_map.items():
-            if t not in type_to_ext:
-                type_to_ext[t] = ext
-
-        # Ensure the extension correlates to the mime type
-        sanitized_name = sanitized_name.split(".")[:-1]
-        sanitized_name.append("" + type_to_ext[mime_type])
-        sanitized_name = "".join(sanitized_name)
-
-        # Save the uploaded file to the specified folder
-        file_path = os.path.join(self.file_upload_folder, os.path.basename(sanitized_name))
-        shutil.copy(file.name, file_path)
-
-        return gr.Textbox(f"File uploaded: {file_path}", visible=True), file_uploads_log + [file_path]
-
-    def log_user_message(self, text_input, file_uploads_log):
-        return (
-            text_input
-            + (
-                f"\nYou have been provided with these files, which might be helpful or not: {file_uploads_log}"
-                if len(file_uploads_log) > 0
-                else ""
-            ),
-            "",
-        )
-
-    def launch(self, **kwargs):
-        import gradio as gr
-
-        with gr.Blocks(fill_height=True) as demo:
-            stored_messages = gr.State([])
-            file_uploads_log = gr.State([])
-            chatbot = gr.Chatbot(
-                label="Agent",
-                type="messages",
-                avatar_images=(
-                    None,
-                    "https://huggingface.co/datasets/agents-course/course-images/resolve/main/en/communication/Alfred.png",
-                ),
-                resizeable=True,
-                scale=1,
-            )
-            # If an upload folder is provided, enable the upload feature
-            if self.file_upload_folder is not None:
-                upload_file = gr.File(label="Upload a file")
-                upload_status = gr.Textbox(label="Upload Status", interactive=False, visible=False)
-                upload_file.change(
-                    self.upload_file,
-                    [upload_file, file_uploads_log],
-                    [upload_status, file_uploads_log],
-                )
-            text_input = gr.Textbox(lines=1, label="Chat Message")
-            text_input.submit(
-                self.log_user_message,
-                [text_input, file_uploads_log],
-                [stored_messages, text_input],
-            ).then(self.interact_with_agent, [stored_messages, chatbot], [chatbot])
-
-        demo.launch(debug=True, share=True, **kwargs)
-
-
-__all__ = ["stream_to_gradio", "GradioUI"]
+## Recent Papers:
+{recent_papers_text}
+"""
+        except sqlite3.Error as e:
+            return f"Error exploring database: {e}"
+    
+    def search_database(self, query):
+        """Search the database for papers matching a query"""
+        if not query:
+            return "Please enter a search query."
+        
+        return self.agent.run(f"Search the database for papers about {query}")
+    
+    def launch(self, share=False, **kwargs):
+        """Launch the custom Gradio UI"""
+        with gr.Blocks(title="ScholarAgent with Advanced ArXiv Tools") as demo:
+            gr.Markdown("# 📚 ScholarAgent with Advanced ArXiv Integration")
+            
+            with gr.Tabs():
+                # Tab 1: Standard Chat Interface
+                with gr.Tab("Chat"):
+                    stored_messages = gr.State([])
+                    file_uploads_log = gr.State([])
+                    chatbot = gr.Chatbot(
+                        label="ScholarAgent",
+                        type="messages",
+                        avatar_images=(
+                            None,
+                            "https://huggingface.co/datasets/agents-course/course-images/resolve/main/en/communication/Alfred.png",
+                        ),
+                        resizeable=True,
+                        scale=1,
+                    )
+                    
+                    # File upload capability
+                    if self.file_upload_folder is not None:
+                        upload_file = gr.File(label="Upload a file")
+                        upload_status = gr.Textbox(label="Upload Status", interactive=False, visible=False)
+                        upload_file.change(
+                            self.upload_file,
+                            [upload_file, file_uploads_log],
+                            [upload_status, file_uploads_log],
+                        )
+                    
+                    text_input = gr.Textbox(lines=2, label="Ask about any research topic")
+                    text_input.submit(
+                        self.log_user_message,
+                        [text_input, file_uploads_log],
+                        [stored_messages, text_input],
+                    ).then(self.interact_with_agent, [stored_messages, chatbot], [chatbot])
+                
+                # Tab 2: Paper Search
+                with gr.Tab("Quick Paper Search"):
+                    gr.Markdown("## 🔍 Search for Recent arXiv Papers")
+                    keywords_input = gr.Textbox(
+                        label="Enter keywords", 
+                        placeholder="e.g., quantum computing, transformers, computer vision",
+                        lines=1
+                    )
+                    search_button = gr.Button("Search")
+                    search_results = gr.Markdown()
+                    search_button.click(
+                        self.search_papers_simple, 
+                        inputs=[keywords_input], 
+                        outputs=[search_results]
+                    )
+                
+                # Tab 3: Paper Analysis
+                with gr.Tab("Paper Analysis"):
+                    gr.Markdown("## 📝 Analyze Specific arXiv Papers")
+                    paper_id = gr.Textbox(
+                        label="Enter arXiv ID or URL", 
+                        placeholder="e.g., 2403.17271 or https://arxiv.org/abs/2403.17271",
+                        lines=1
+                    )
+                    analysis_request = gr.Textbox(
+                        label="What would you like to know about this paper?",
+                        placeholder="e.g., Summarize the main contributions, Explain the methodology, Evaluate the limitations",
+                        lines=2
+                    )
+                    analyze_button = gr.Button("Analyze Paper")
+                    analysis_results = gr.Markdown()
+                    analyze_button.click(
+                        self.analyze_paper, 
+                        inputs=[paper_id, analysis_request], 
+                        outputs=[analysis_results]
+                    )
+                
+                # Tab 4: LaTeX Extraction
+                with gr.Tab("LaTeX Extraction"):
+                    gr.Markdown("## 📄 Extract LaTeX Content from Papers")
+                    latex_paper_id = gr.Textbox(
+                        label="Enter arXiv ID or URL", 
+                        placeholder="e.g., 2403.17271 or https://arxiv.org/abs/2403.17271",
+                        lines=1
+                    )
+                    extract_type = gr.Radio(
+                        ["All LaTeX", "Equations Only", "Algorithms Only", "Important Content"],
+                        label="What would you like to extract?",
+                        value="Important Content"
+                    )
+                    extract_button = gr.Button("Extract Content")
+                    extract_results = gr.Markdown()
+                    extract_button.click(
+                        self.extract_latex, 
+                        inputs=[latex_paper_id, extract_type], 
+                        outputs=[extract_results]
+                    )
+                
+                # Tab 5: Database Explorer
+                with gr.Tab("Database Explorer"):
+                    gr.Markdown("## 🗃️ Explore Your Local arXiv Database")
+                    with gr.Row():
+                        refresh_button = gr.Button("Refresh Database Statistics")
+                        search_db_button = gr.Button("Search Database")
+                    
+                    db_query = gr.Textbox(
+                        label="Search Query", 
+                        placeholder="e.g., quantum computing",
+                        lines=1
+                    )
+                    
+                    db_info = gr.Markdown("Click 'Refresh' to view database statistics")
+                    
+                    refresh_button.click(
+                        self.explore_database, 
+                        inputs=[], 
+                        outputs=[db_info]
+                    )
+                    
+                    search_db_button.click(
+                        self.search_database, 
+                        inputs=[db_query], 
+                        outputs=[db_info]
+                    )
+        
+        # Launch the demo
+        demo.launch(share=share, **kwargs)
