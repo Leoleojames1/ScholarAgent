@@ -4,13 +4,26 @@ ScholarAgent is an AI-powered tool that helps researchers find the most relevant
 
 ## Running ScholarAgent
 
-To start the application, run:
+To start the application, follow these steps:
 
-```bash
-python app.py
-```
-
-Make sure to add your Hugging Face token before running the code.
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/ScholarAgent.git
+   cd ScholarAgent
+   ```
+2. Install the required dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Add your Hugging Face token as an environment variable:
+   ```bash
+   export HF_TOKEN=your_huggingface_token
+   ```
+   (On Windows, use `set HF_TOKEN=your_huggingface_token` instead.)
+4. Run the application:
+   ```bash
+   python app.py
+   ```
 
 Once running, you can interact with the AI agent through the Gradio UI.
 
@@ -37,23 +50,6 @@ ScholarAgent utilizes:
 - Integration with GPT-powered summarization for research insights.
 - Personalized recommendations based on past searches.
 
-## Contributing
-Contributions are welcome!
-
-1. Fork the repository.
-2. Create a new branch:
-   ```bash
-   git checkout -b feature-new-search
-   ```
-3. Commit your changes:
-   ```bash
-   git commit -m "Added new ranking feature"
-   ```
-4. Push the branch:
-   ```bash
-   git push origin feature-new-search
-   ```
-5. Open a Pull Request.
 
 ## Feedback
 Tried ScholarAgent? Share your feedback! Open an issue or reach out.
