@@ -134,15 +134,22 @@ This app extends the ScholarAgent with powerful capabilities for fetching,
 downloading, and analyzing arXiv papers including their LaTeX source code.
 """
 
+"""
+ScholarAgent with Advanced ArXiv Integration
+
+This app extends the ScholarAgent with powerful capabilities for fetching, 
+downloading, and analyzing arXiv papers including their LaTeX source code.
+"""
+
 import feedparser
 import urllib.parse
 import yaml
 import os
+import gradio as gr
 from tools.final_answer import FinalAnswerTool
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import gradio as gr
 from smolagents import CodeAgent, DuckDuckGoSearchTool, HfApiModel, load_tool, tool
 import nltk
 import datetime
@@ -150,9 +157,6 @@ import requests
 import pytz
 import argparse
 from pathlib import Path
-
-# Import UI components
-from Gradio_UI import GradioUI
 
 # Import the Advanced ArXiv Tool
 from tools.advanced_arxiv_tool import AdvancedArxivTool
@@ -246,36 +250,6 @@ def parse_arguments():
     
     return parser.parse_args()
 
-def run_basic_ui():
-    """Run the original basic UI"""
-    # Create Gradio UI
-    with gr.Blocks() as demo:
-        gr.Markdown("# ScholarAgent")
-        keyword_input = gr.Textbox(label="Enter keywords (comma-separated)", 
-                                  placeholder="e.g., deep learning, reinforcement learning")
-        output_display = gr.Markdown()
-        search_button = gr.Button("Search")
-
-        search_button.click(search_papers, inputs=[keyword_input], outputs=[output_display])
-
-        print("DEBUG: Basic Gradio UI is running. Waiting for user input...")
-
-    # Launch Gradio App
-    demo.launch()
-
-def run_advanced_ui(agent, args):
-    """Run the advanced UI with the full agent"""
-    # Create an upload folder for PDFs and other documents
-    upload_folder = Path("./uploads")
-    upload_folder.mkdir(exist_ok=True)
-    
-    # Initialize the GradioUI with our agent
-    ui = GradioUI(agent=agent, file_upload_folder=str(upload_folder))
-    
-    # Launch the UI
-    print("DEBUG: Advanced Gradio UI with agent integration is running...")
-    ui.launch(share=args.share)
-
 def search_papers(user_input):
     """Legacy function for basic UI paper search"""
     keywords = [kw.strip() for kw in user_input.split(",") if kw.strip()]  # Ensure valid keywords
@@ -351,13 +325,107 @@ def main():
         prompt_templates=prompt_templates
     )
     
-    # Run the advanced UI with the full agent
-    run_advanced_ui(agent, args)
+    # Create a basic Gradio UI without using the GradioUI class
+    # This avoids the circular import issue
+    with gr.Blocks() as demo:
+        gr.Markdown("# 📚 ScholarAgent with Advanced ArXiv Integration")
+        
+        with gr.Tabs():
+            # Tab 1: Basic paper search (original functionality)
+            with gr.Tab("Quick Paper Search"):
+                keyword_input = gr.Textbox(
+                    label="Enter keywords (comma-separated)", 
+                    placeholder="e.g., deep learning, reinforcement learning",
+                    lines=1
+                )
+                output_display = gr.Markdown()
+                search_button = gr.Button("Search")
+                search_button.click(search_papers, inputs=[keyword_input], outputs=[output_display])
+                
+            # Tab 2: Chat with agent
+            with gr.Tab("Chat with Agent"):
+                chat_history = gr.Chatbot()
+                user_input = gr.Textbox(
+                    label="Ask anything about research papers", 
+                    placeholder="e.g., Find papers about quantum computing, Analyze paper 2403.12345",
+                    lines=2
+                )
+                
+                def chat_with_agent(message, history):
+                    # Append user message
+                    history.append((message, ""))
+                    # Run agent
+                    response = agent.run(message)
+                    # Update last response
+                    history[-1] = (message, str(response))
+                    return "", history
+                
+                user_input.submit(
+                    chat_with_agent, 
+                    inputs=[user_input, chat_history], 
+                    outputs=[user_input, chat_history]
+                )
+                
+            # Tab 3: Paper Analysis
+            with gr.Tab("Paper Analysis"):
+                paper_id = gr.Textbox(
+                    label="Enter arXiv ID or URL", 
+                    placeholder="e.g., 2403.17271 or https://arxiv.org/abs/2403.17271",
+                    lines=1
+                )
+                analysis_options = gr.Radio(
+                    choices=["Paper Info", "Download Source", "Extract LaTeX", "Analyze Content"],
+                    label="What would you like to do?",
+                    value="Paper Info"
+                )
+                analysis_query = gr.Textbox(
+                    label="Specific request (if needed)",
+                    placeholder="e.g., Extract equations, Find main contributions",
+                    lines=2,
+                    visible=False
+                )
+                
+                def update_query_visibility(option):
+                    return gr.update(visible=option in ["Extract LaTeX", "Analyze Content"])
+                
+                analysis_options.change(
+                    update_query_visibility,
+                    inputs=[analysis_options],
+                    outputs=[analysis_query]
+                )
+                
+                analyze_button = gr.Button("Process Paper")
+                analysis_results = gr.Markdown()
+                
+                def process_paper(paper_id, option, query):
+                    if not paper_id:
+                        return "Please provide a paper ID or URL"
+                    
+                    if option == "Paper Info":
+                        prompt = f"Get detailed information about the paper {paper_id}"
+                    elif option == "Download Source":
+                        prompt = f"Download the source code for paper {paper_id} and tell me what you found"
+                    elif option == "Extract LaTeX":
+                        if query:
+                            prompt = f"Extract LaTeX content from paper {paper_id} related to: {query}"
+                        else:
+                            prompt = f"Extract the most important LaTeX content from paper {paper_id}"
+                    elif option == "Analyze Content":
+                        if query:
+                            prompt = f"For paper {paper_id}, {query}"
+                        else:
+                            prompt = f"Analyze the main contributions and methodology of paper {paper_id}"
+                    
+                    return agent.run(prompt)
+                
+                analyze_button.click(
+                    process_paper,
+                    inputs=[paper_id, analysis_options, analysis_query],
+                    outputs=[analysis_results]
+                )
+    
+    # Launch the UI
+    demo.launch(share=args.share)
 
 if __name__ == "__main__":
     main()
-
-
-# Launch Gradio App
-demo.launch()
-
