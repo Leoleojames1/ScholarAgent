@@ -1,0 +1,11 @@
+markdownify
+smolagents
+requests
+duckduckgo_search
+pandas
+feedparser
+rank_bm25
+nltk
+scikit-learn
+numpy
+
