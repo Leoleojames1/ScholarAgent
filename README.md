@@ -1,18 +1,9 @@
----
-title: ScholarAgent
-emoji: ⚡
-colorFrom: pink
-colorTo: yellow
-sdk: gradio
-sdk_version: 5.15.0
-app_file: app.py
-pinned: false
-tags:
-- smolagents
-- agent
-- smolagent
-- tool
-- agent-course
----
+# ScholarAgent
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+ScholarAgent is an AI-powered research assistant that fetches the **top 3 most recent** research papers from **ArXiv** based on relevant keywords. It works similarly to Google Scholar but provides a more **user-friendly and readable** search experience.
+
+## Installation
+
+### Install dependencies
+```bash
+pip install -r requirements.txt
